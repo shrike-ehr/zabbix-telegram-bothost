@@ -1,27 +1,23 @@
 #!/usr/bin/env python3
 import json
 import os
-import re
 import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 SECRET = os.environ["ZABBIX_WEBHOOK_SECRET"]
 PORT = int(os.environ.get("PORT", "3000"))
 
-
 def pick_mark(payload: dict) -> str:
-    """Возвращает эмодзи по полям event_value / event_update_status."""
     update_status = str(payload.get("event_update_status", "")).strip()
     event_value = str(payload.get("event_value", "")).strip()
 
     if update_status == "1":
-        return "🔵"          # UPDATE ACTION
+        return "🔵"
     if event_value == "1":
-        return "🔴"          # PROBLEM
+        return "🔴"
     if event_value == "0":
-        return "🟢"          # RESOLVED
-    return "⚪"              # неизвестно / нет данных
-
+        return "🟢"
+    return "⚪"
 
 def send_telegram(api_token: str, payload: dict) -> None:
     url = f"https://api.telegram.org/bot{api_token}/sendMessage"
@@ -31,7 +27,6 @@ def send_telegram(api_token: str, payload: dict) -> None:
     )
     with urllib.request.urlopen(req, timeout=15) as resp:
         resp.read()
-
 
 class Handler(BaseHTTPRequestHandler):
     def _send(self, code: int, body: str = "ok") -> None:
@@ -49,46 +44,41 @@ class Handler(BaseHTTPRequestHandler):
             self._send(404, "not found")
 
     def do_POST(self):
-        print(f"--> ПОЛУЧЕН POST: {self.path}", flush=True)
-        print(f"--> Заголовки: {self.headers}", flush=True)
-        
-        path = self.path.split("?", 1)[0]
-        m = re.match(r"^/zabbix/bot([^/]+)/sendMessage$", path)
-        if not m:
-            print("--> ОШИБКА: Неверный путь (regex не совпал)", flush=True)
+        if self.path.split("?", 1)[0] != "/zabbix":
             self._send(404, "not found")
             return
+
         if self.headers.get("X-Webhook-Secret", "") != SECRET:
-            print("--> ОШИБКА: Неверный секрет", flush=True)
             self._send(403, "forbidden")
             return
 
-        api_token = m.group(1)
+        # Забираем токен из заголовка (чтобы не пихать его в длинный URL)
+        api_token = self.headers.get("X-Api-Token", "")
+        if not api_token:
+            self._send(400, "missing api_token header")
+            return
+
         length = int(self.headers.get("Content-Length", "0"))
         raw = self.rfile.read(length)
-        
         try:
             payload = json.loads(raw.decode() or "{}")
         except json.JSONDecodeError:
-            print("--> ОШИБКА: Невалидный JSON", flush=True)
             self._send(400, "bad json")
             return
 
-        print(f"--> Тело запроса: {payload}", flush=True)
-        
+        # Маркировка
         mark = pick_mark(payload)
         text = payload.get("text", "")
         payload["text"] = f"{mark} {text}" if text else mark
 
+        # Очистка
         for key in ("api_token", "event_value", "event_update_status", "event_nseverity", "event_severity", "event_update_nseverity", "event_update_severity", "event_source", "event_tags", "tls_verify"):
             payload.pop(key, None)
 
         try:
-            print("--> Отправляем в Telegram...", flush=True)
             send_telegram(api_token, payload)
-            print("--> Telegram ответил успешно!", flush=True)
         except Exception as exc:
-            print(f"--> ОШИБКА TELEGRAM: {exc}", flush=True)
+            print("telegram error:", exc)
             self._send(502, "telegram error")
             return
         self._send(200, "ok")
@@ -96,8 +86,7 @@ class Handler(BaseHTTPRequestHandler):
     def log_message(self, fmt, *args):
         print("%s - %s" % (self.address_string(), fmt % args))
 
-
 if __name__ == "__main__":
     server = ThreadingHTTPServer(("0.0.0.0", PORT), Handler)
-    print(f"listening on 0.0.0.0:{PORT}", flush=True)
+    print(f"listening on 0.0.0.0:{PORT}")
     server.serve_forever()
